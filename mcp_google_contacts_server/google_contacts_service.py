@@ -1,8 +1,12 @@
+import base64
+import io
 import json
 import os
-from typing import Dict, List, Optional, Union, Any
+from typing import Dict, List, Optional, Tuple, Union, Any
 from pathlib import Path
 
+import httpx
+from PIL import Image, ImageOps
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
@@ -10,6 +14,14 @@ from google.auth.transport.requests import Request
 from googleapiclient.errors import HttpError
 
 from mcp_google_contacts_server.config import config
+
+# Google displays contact photos as circles and recommends 720x720 square
+# JPEG/PNG up to 5 MB. We normalise client-side before upload.
+MAX_PHOTO_BYTES = 5 * 1024 * 1024
+MAX_RAW_DOWNLOAD_BYTES = 25 * 1024 * 1024
+DEFAULT_PHOTO_TARGET_SIZE = 720
+MIN_PHOTO_TARGET_SIZE = 250
+JPEG_QUALITY = 85
 
 class GoogleContactsError(Exception):
     """Exception raised for errors in the Google Contacts service."""
@@ -363,11 +375,81 @@ class GoogleContactsService:
             self.service.people().deleteContact(
                 resourceName=resource_name
             ).execute()
-            
+
             return {'success': True, 'resourceName': resource_name}
-        
+
         except HttpError as error:
             raise GoogleContactsError(f"Error deleting contact: {error}")
+
+    def update_contact_photo_from_url(
+        self,
+        resource_name: str,
+        photo_url: str,
+        target_size: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Download an image from a URL and set it as the contact's photo.
+
+        The image is center-cropped to a square and resized to
+        ``target_size`` (default 720 px – Google's recommendation) before
+        being base64-encoded and sent to ``people.updateContactPhoto``.
+        """
+        if not resource_name.startswith("people/"):
+            raise GoogleContactsError(
+                f"Invalid resource name '{resource_name}'. Must start with 'people/'."
+            )
+
+        size = target_size or int(
+            os.environ.get("MCP_CONTACT_PHOTO_SIZE", DEFAULT_PHOTO_TARGET_SIZE)
+        )
+        if size < MIN_PHOTO_TARGET_SIZE:
+            raise GoogleContactsError(
+                f"Target size {size} is below Google's 250 px minimum."
+            )
+
+        raw_bytes, raw_content_type = _download_image(photo_url)
+        normalised, final_content_type, original_size = _normalise_for_contact_photo(
+            raw_bytes, size
+        )
+
+        encoded = base64.b64encode(normalised).decode("utf-8")
+
+        body = {
+            "photoBytes": encoded,
+            "personFields": "names,emailAddresses,phoneNumbers,photos",
+        }
+
+        try:
+            response = self.service.people().updateContactPhoto(
+                resourceName=resource_name,
+                body=body,
+            ).execute()
+        except HttpError as error:
+            raise GoogleContactsError(
+                f"Error updating contact photo: {error}"
+            )
+
+        person = response.get("person", {})
+        formatted = self._format_contact(person) if person else {
+            "resourceName": resource_name
+        }
+        photo_url_returned = None
+        photos = person.get("photos", []) if person else []
+        if photos:
+            photo_url_returned = photos[0].get("url")
+
+        return {
+            "success": True,
+            "resourceName": resource_name,
+            "sourceUrl": photo_url,
+            "sourceContentType": raw_content_type,
+            "sourceBytes": len(raw_bytes),
+            "sourceDimensions": original_size,
+            "uploadedContentType": final_content_type,
+            "uploadedBytes": len(normalised),
+            "uploadedSize": f"{size}x{size}",
+            "photoUrl": photo_url_returned,
+            "contact": formatted,
+        }
     
     def list_directory_people(self, query: Optional[str] = None, max_results: int = 50) -> List[Dict]:
         """List people from the Google Workspace directory.
@@ -547,3 +629,75 @@ class GoogleContactsService:
             'department': department,
             'jobTitle': job_title
         }
+
+
+def _download_image(url: str) -> Tuple[bytes, str]:
+    """Fetch an image URL and return ``(bytes, content_type_from_server)``."""
+    if not url or not url.lower().startswith(("http://", "https://")):
+        raise GoogleContactsError(f"Photo URL must be http(s): got '{url}'")
+
+    with httpx.Client(
+        follow_redirects=True,
+        timeout=30.0,
+        headers={"User-Agent": "mcp-google-contacts-server"},
+    ) as client:
+        response = client.get(url)
+        response.raise_for_status()
+        data = response.content
+
+    if len(data) == 0:
+        raise GoogleContactsError("Downloaded image is empty")
+    if len(data) > MAX_RAW_DOWNLOAD_BYTES:
+        raise GoogleContactsError(
+            f"Downloaded image is too large ({len(data)} bytes); "
+            f"max {MAX_RAW_DOWNLOAD_BYTES}"
+        )
+
+    content_type = (
+        response.headers.get("content-type", "").split(";")[0].strip().lower()
+    )
+    return data, content_type or "application/octet-stream"
+
+
+def _normalise_for_contact_photo(
+    data: bytes, target_size: int
+) -> Tuple[bytes, str, Tuple[int, int]]:
+    """Center-crop to a square, resize to ``target_size`` and JPEG-encode.
+
+    Returns ``(bytes, "image/jpeg", (original_w, original_h))``.
+    """
+    try:
+        img = Image.open(io.BytesIO(data))
+        img.load()
+    except Exception as error:
+        raise GoogleContactsError(f"Unreadable image data: {error}")
+
+    original_size = img.size
+
+    # Honour EXIF orientation so portrait phone photos don't end up sideways.
+    img = ImageOps.exif_transpose(img)
+
+    # Flatten transparency onto white: Google's circle-crop display gives
+    # ugly halos on contacts with alpha channels otherwise.
+    if img.mode != "RGB":
+        rgba = img.convert("RGBA")
+        background = Image.new("RGB", rgba.size, (255, 255, 255))
+        background.paste(rgba, mask=rgba.split()[-1])
+        img = background
+
+    # Never upscale tiny sources; just center-crop and shrink when larger.
+    fitted_side = min(min(img.size), target_size)
+    img = ImageOps.fit(
+        img, (fitted_side, fitted_side), method=Image.LANCZOS, centering=(0.5, 0.5)
+    )
+
+    buffer = io.BytesIO()
+    img.save(
+        buffer, format="JPEG", quality=JPEG_QUALITY, optimize=True, progressive=True
+    )
+    if buffer.tell() > MAX_PHOTO_BYTES:
+        raise GoogleContactsError(
+            f"Encoded JPEG is {buffer.tell()} bytes, exceeds the 5 MB upload cap."
+        )
+
+    return buffer.getvalue(), "image/jpeg", original_size

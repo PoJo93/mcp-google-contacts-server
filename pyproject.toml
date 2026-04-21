@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mcp-google-contacts-server"
-version = "0.1.1"
-description = "MCP server for Google Contacts integration"
+version = "0.2.0"
+description = "FastMCP server for Google Contacts with optional Google OAuth gating (Prefect-ready)"
 readme = "README.md"
 authors = [
     {name = "Rayan Zaki", email = "rayan.hassici@ensia.edu.dz"}
@@ -18,10 +18,13 @@ classifiers = [
 ]
 requires-python = ">=3.12"
 dependencies = [
-    "fastmcp",
+    "fastmcp>=2.12",
     "google-api-python-client",
     "google-auth",
     "google-auth-oauthlib",
+    "httpx",
+    "pillow>=10",
+    "pydantic",
 ]
 
 [project.urls]

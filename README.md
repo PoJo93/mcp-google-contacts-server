@@ -1,137 +1,133 @@
 [![MseeP.ai Security Assessment Badge](https://mseep.net/pr/rayanzaki-mcp-google-contacts-server-badge.png)](https://mseep.ai/app/rayanzaki-mcp-google-contacts-server)
 
-# 📇 MCP Google Contacts Server
+# MCP Google Contacts Server
 
-A Machine Conversation Protocol (MCP) server that provides Google Contacts functionality, allowing AI assistants to manage contacts, search your organization's directory, and interact with Google Workspace. Much updated from its original by Gemini AI in Gemini CLI. 
+A [FastMCP 2.x](https://gofastmcp.com/) server that exposes Google Contacts to
+MCP clients such as Claude. It can run as a local **stdio** server or as a
+remote **HTTP** server protected by **Google OAuth** (ready to be deployed to
+[Prefect Horizon](https://www.prefect.io/horizon) – or any other MCP host).
 
-## ✨ Features
+## Features
 
-- List and search Google Contacts
-- Create, update, and delete contacts
-- Search Google Workspace directory
-- View "Other Contacts" (people you've interacted with but haven't added)
-- Access Google Workspace users in your organization
+- List, get, create, update, delete contacts
+- Search contacts, Workspace directory, "Other contacts"
+- **New:** `update_contact_photo` – give the AI a URL, the server downloads the
+  image, base64-encodes it and PATCHes `people.updateContactPhoto`
+- Optional Google OAuth gate: users must sign in with their Google account
+  before any tool can be called
+- Optional e-mail allow-list (`MCP_OAUTH_ALLOWED_EMAILS`)
 
-## 🚀 Installation
+## Installation
 
-### 📋 Prerequisites
-
-- Python 3.12 or higher
-- Google account with contacts access
-- Google Cloud project with People API enabled
-- OAuth 2.0 credentials for Google API access
-
-### 📦 Installation from Source
-
-To install the `mcp-google-contacts-server` as a Python package:
-
-1.  **Clone the repository:**
-    ```bash
-    git clone https://github.com/rayanzaki/mcp-google-contacts-server.git
-    cd mcp-google-contacts-server
-    ```
-
-2.  **Rename the source directory:**
-    The package expects the source code to be in a directory named `mcp_google_contacts_server`.
-    ```bash
-    mv src mcp_google_contacts_server
-    ```
-
-3.  **Install the package:**
-    This will install the package and its dependencies, making the `mcp-google-contacts` command available in your PATH.
-    ```bash
-    pip install .
-    ```
-
-    *Note: If you encounter import errors after installation, ensure that relative imports within the source files (`main.py`, `tools.py`, `google_contacts_service.py`, `formatters.py`, `config.py`) are updated to use absolute imports (e.g., `from mcp_google_contacts_server.module_name import ...`). This is typically handled automatically by `pip install .` but can sometimes require manual adjustment if the package structure is unusual.*
-
-## 🔑 Authentication Setup
-
-The server requires Google API credentials to access your contacts. You have several options:
-
-### 🔐 Option 1: Using a credentials.json file
-
-1. Create a Google Cloud project and enable the People API
-2. Create OAuth 2.0 credentials (Desktop application type)
-3. Download the credentials.json file
-4. Place it in one of these locations:
-   - The root directory of this project
-   - Your home directory (~/google-contacts-credentials.json)
-   - Specify its location with the `--credentials-file` argument
-
-### 🔐 Option 2: Using environment variables
-
-Set the following environment variables:
-- `GOOGLE_CLIENT_ID`: Your Google OAuth client ID
-- `GOOGLE_CLIENT_SECRET`: Your Google OAuth client secret
-- `GOOGLE_REFRESH_TOKEN`: A valid refresh token for your account
-
-*Note: If your existing environment variables for Google OAuth client ID and client secret have different names (e.g., `GOOGLE_OAUTH_CLIENT_ID`), you can alias them in your `.env` file (e.g., `GOOGLE_CLIENT_ID=$GOOGLE_OAUTH_CLIENT_ID`) to ensure the server picks them up correctly.*
-Use e.g. `export GOOGLE_CLIENT_ID=$GOOGLE_OAUTH_CLIENT_ID && export GOOGLE_CLIENT_SECRET=$GOOGLE_OAUTH_CLIENT_SECRET` in command line before: `mcp-google-contacts` :
-
-```
-env | grep GOOGLE
-export GOOGLE_CLIENT_ID=$GOOGLE_OAUTH_CLIENT_ID && export GOOGLE_CLIENT_SECRET=$GOOGLE_OAUTH_CLIENT_SECRET
-env | grep GOOGLE
-mcp-google-contacts
-```
-{authentication evocation should happen here)
-
-
-### 🚀 Initial Authorization (Recommended)
-
-For the initial authorization flow to obtain your `GOOGLE_REFRESH_TOKEN`, it is recommended to run the `mcp-google-contacts` command directly in your terminal (outside of any MCP client that might obscure the interactive browser prompts).
-
-Example:
-```bash
-mcp-google-contacts
-```
-Follow the instructions in your terminal and browser to complete the authentication. Once the `GOOGLE_REFRESH_TOKEN` is displayed, you can set it as an environment variable for non-interactive use.
-
-## 🛠️ Usage
-
-### 🏃‍♂️ Basic Startup
+Requires Python 3.12+.
 
 ```bash
-python src/main.py
+pip install .
 # or
-uv run src/main.py
+uv sync
 ```
 
-This starts the server with the default stdio transport.
+## Running
 
-### ⚙️ Command Line Arguments
+### Local (stdio)
 
-| Argument | Description | Default Value |
-|----------|-------------|---------------|
-| `--transport` | Transport protocol to use (`stdio` or `http`) | `stdio` |
-| `--host` | Host for HTTP transport | `localhost` |
-| `--port` | Port for HTTP transport | `8000` |
-| `--client-id` | Google OAuth client ID (overrides environment variable) | - |
-| `--client-secret` | Google OAuth client secret (overrides environment variable) | - |
-| `--refresh-token` | Google OAuth refresh token (overrides environment variable) | - |
-| `--credentials-file` | Path to Google OAuth credentials.json file | - |
+The classic setup – credentials come from a `credentials.json` file or from
+`GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` / `GOOGLE_REFRESH_TOKEN`
+environment variables. No OAuth gate.
 
-### 📝 Examples
-
-Start with HTTP transport:
 ```bash
-python src/main.py --transport http --port 8080
+mcp-google-contacts
 ```
 
-Use specific credentials file:
+### Remote / Prefect (HTTP + Google OAuth)
+
+Two roles:
+
+1. **Server credentials** used to call the Google People API on your behalf –
+   `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REFRESH_TOKEN`.
+   Obtain the refresh token once by running the server locally with stdio and
+   going through the browser flow. Store the three values as Prefect secrets.
+2. **OAuth gate** used to authenticate *the caller* of the MCP server with
+   their Google account via FastMCP's
+   [`GoogleProvider`](https://gofastmcp.com/integrations/google).
+
+Minimum env vars for a Prefect Horizon deployment:
+
+| Variable | Description |
+|---|---|
+| `GOOGLE_CLIENT_ID` | OAuth Web client ID (Cloud Console) |
+| `GOOGLE_CLIENT_SECRET` | OAuth Web client secret |
+| `GOOGLE_REFRESH_TOKEN` | Refresh token authorising the People API calls |
+| `MCP_OAUTH_ENABLED` | `1` to turn the OAuth gate on |
+| `MCP_OAUTH_BASE_URL` | Public URL Prefect assigns, e.g. `https://contacts-xyz.horizon.prefect.dev` |
+| `MCP_OAUTH_REDIRECT_PATH` | Defaults to `/auth/callback` – add the same to the OAuth client's *Authorized redirect URIs* |
+| `MCP_OAUTH_ALLOWED_EMAILS` | Optional comma-separated allow-list |
+| `MCP_OAUTH_JWT_SIGNING_KEY` | Optional persistent HMAC key so FastMCP-issued JWTs survive restarts |
+| `MCP_TRANSPORT` | Set to `http` (or `streamable-http`) for remote use |
+| `PORT` | Prefect sets this – picked up automatically |
+
+Run command for a Prefect container:
+
 ```bash
-python src/main.py --credentials-file /path/to/your/credentials.json
+mcp-google-contacts --transport http --oauth
 ```
 
-Provide credentials directly:
+or equivalently just:
+
 ```bash
-python src/main.py --client-id YOUR_CLIENT_ID --client-secret YOUR CLIENT_SECRET --refresh-token YOUR_REFRESH_TOKEN
+MCP_TRANSPORT=http MCP_OAUTH_ENABLED=1 mcp-google-contacts
 ```
 
-## 🔌 Integration with MCP Clients
+### Google Cloud Console setup
 
-To use this server with MCP clients (like Anthropic's Claude with Cline), add it to your MCP configuration:
+1. Enable the **People API** in your project.
+2. Create an OAuth 2.0 **Web application** client.
+3. Under *Authorized redirect URIs* add `${MCP_OAUTH_BASE_URL}/auth/callback`.
+4. Grant the scopes `openid`, `userinfo.email`, `auth/contacts`, and
+   `auth/directory.readonly` on the consent screen.
+
+## Tools
+
+| Tool | Description |
+|------|-------------|
+| `list_contacts` | List contacts, optional name filter |
+| `get_contact` | Get a contact by resource name or email |
+| `create_contact` | Create a new contact |
+| `update_contact` | Update an existing contact |
+| `delete_contact` | Delete a contact |
+| `search_contacts` | Local fuzzy search across name / email / phone |
+| `list_workspace_users` | List Google Workspace directory users |
+| `search_directory` | Search the Workspace directory |
+| `get_other_contacts` | People from the "Other contacts" section |
+| `update_contact_photo` | **New** – set a contact's photo from a URL |
+
+### `update_contact_photo`
+
+```python
+update_contact_photo(
+    resource_name="people/c12345678901234567",
+    photo_url="https://example.com/jane.jpg",
+    # target_size=720,  # optional, default 720 (Google's recommendation)
+)
+```
+
+The server:
+
+1. Downloads the URL (up to 25 MB raw, any format Pillow can decode).
+2. Honours EXIF orientation, flattens transparency onto white.
+3. **Center-crops to a 1:1 square** – Google displays contact photos as
+   circles, so non-square input would be ugly.
+4. **Resizes to 720×720 px** (Google's recommended profile photo size;
+   minimum is 250 px). Configurable via `target_size` argument or
+   `MCP_CONTACT_PHOTO_SIZE` env var. Source images smaller than the target
+   are kept at their original size (no upscaling).
+5. JPEG-encodes with progressive quality fallback so the payload stays
+   under Google's 5 MB upload cap.
+6. Base64-encodes and calls
+   `PATCH https://people.googleapis.com/v1/{resourceName}:updateContactPhoto`
+   ([docs](https://developers.google.com/people/api/rest/v1/people/updateContactPhoto)).
+
+## MCP client configuration (local)
 
 ```json
 {
@@ -139,162 +135,20 @@ To use this server with MCP clients (like Anthropic's Claude with Cline), add it
     "google-contacts-server": {
       "command": "uv",
       "args": [
-         "--directory",
-         "/path/to/mcp-google-contacts-server",
-         "run",
-        "main.py"
-      ],
-      "disabled": false,
-      "autoApprove": []
+        "--directory",
+        "/path/to/mcp-google-contacts-server",
+        "run",
+        "mcp-google-contacts"
+      ]
     }
   }
 }
 ```
 
-## 🧰 Available Tools
+For a remote Prefect-hosted server your MCP client simply points at
+`${MCP_OAUTH_BASE_URL}/mcp` (or the URL Prefect shows) and negotiates OAuth on
+the first connection.
 
-This MCP server provides the following tools:
+## License
 
-| Tool | Description |
-|------|-------------|
-| `list_contacts` | List all contacts or filter by name |
-| `get_contact` | Get a contact by resource name or email |
-| `create_contact` | Create a new contact |
-| `update_contact` | Update an existing contact |
-| `delete_contact` | Delete a contact by resource name |
-| `search_contacts` | Search contacts by name, email, or phone number |
-| `list_workspace_users` | List Google Workspace users in your organization's directory |
-| `search_directory` | Search for people in the Google Workspace directory |
-| `get_other_contacts` | Retrieve contacts from the 'Other contacts' section |
-
-### 🔍 Detailed Tool Descriptions
-
-#### 📋 `list_contacts`
-Lists all your Google contacts or filters them by name.
-
-**Parameters:**
-- `name_filter` (optional): String to filter contacts by name
-- `max_results` (optional): Maximum number of contacts to return (default: 100)
-
-**Example:**
-```python
-list_contacts(name_filter="John", max_results=10)
-```
-
-#### 👤 `get_contact`
-Retrieves detailed information about a specific contact.
-
-**Parameters:**
-- `identifier`: Resource name (people/*) or email address of the contact
-
-**Example:**
-```python
-get_contact("john.doe@example.com")
-# or
-get_contact("people/c12345678901234567")
-```
-
-#### ➕ `create_contact`
-Creates a new contact in your Google Contacts.
-
-**Parameters:**
-- `given_name`: First name of the contact
-- `family_name` (optional): Last name of the contact
-- `email` (optional): Email address of the contact
-- `phone` (optional): Phone number of the contact
-
-**Example:**
-```python
-create_contact(given_name="Jane", family_name="Smith", email="jane.smith@example.com", phone="+1-555-123-4567")
-```
-
-#### ✏️ `update_contact`
-Updates an existing contact with new information.
-
-**Parameters:**
-- `resource_name`: Contact resource name (people/*)
-- `given_name` (optional): Updated first name
-- `family_name` (optional): Updated last name
-- `email` (optional): Updated email address
-- `phone` (optional): Updated phone number
-
-**Example:**
-```python
-update_contact(resource_name="people/c12345678901234567", email="new.email@example.com")
-```
-
-#### 🗑️ `delete_contact`
-Deletes a contact from your Google Contacts.
-
-**Parameters:**
-- `resource_name`: Contact resource name (people/*) to delete
-
-**Example:**
-```python
-delete_contact(resource_name="people/c12345678901234567")
-```
-
-#### 🔍 `search_contacts`
-Searches your contacts by name, email, or phone number.
-
-**Parameters:**
-- `query`: Search term to find in contacts
-- `max_results` (optional): Maximum number of results to return (default: 10)
-
-**Example:**
-```python
-search_contacts(query="john", max_results=5)
-```
-
-#### 🏢 `list_workspace_users`
-Lists Google Workspace users in your organization's directory.
-
-**Parameters:**
-- `query` (optional): Search term to find specific users
-- `max_results` (optional): Maximum number of results to return (default: 50)
-
-**Example:**
-```python
-list_workspace_users(query="engineering", max_results=25)
-```
-
-#### 🔭 `search_directory`
-Performs a targeted search of your organization's Google Workspace directory.
-
-**Parameters:**
-- `query`: Search term to find specific directory members
-- `max_results` (optional): Maximum number of results to return (default: 20)
-
-**Example:**
-```python
-search_directory(query="product manager", max_results=10)
-```
-
-#### 👥 `get_other_contacts`
-Retrieves contacts from the 'Other contacts' section - people you've interacted with but haven't added to your contacts.
-
-**Parameters:**
-- `max_results` (optional): Maximum number of results to return (default: 50)
-
-**Example:**
-```python
-get_other_contacts(max_results=30)
-```
-
-## 🔒 Permissions
-
-When first running the server, you'll need to authenticate with Google and grant the necessary permissions to access your contacts. The authentication flow will guide you through this process.
-
-## ❓ Troubleshooting
-
-- **🔐 Authentication Issues**: Ensure your credentials are valid and have the necessary scopes
-- **⚠️ API Limits**: Be aware of Google People API quota limits
-- **📝 Logs**: Check the console output for error messages and debugging information
-
-## 👥 Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
-
-## 📄 License
-
-This project is licensed under the MIT License - see the LICENSE file for details.
+MIT – see LICENSE.

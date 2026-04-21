@@ -1,9 +1,9 @@
-mcp[cli]
+fastmcp>=2.12
 google-auth
 google-api-python-client
 google-auth-httplib2
 google-auth-oauthlib
-google-auth
 httpx
+pillow>=10
 pydantic
 typing-extensions
