@@ -1,8 +1,10 @@
+import base64
 import json
 import os
-from typing import Dict, List, Optional, Union, Any
+from typing import Dict, List, Optional, Tuple, Union, Any
 from pathlib import Path
 
+import httpx
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
@@ -10,6 +12,11 @@ from google.auth.transport.requests import Request
 from googleapiclient.errors import HttpError
 
 from mcp_google_contacts_server.config import config
+
+# Google People API limits for contact photos.
+# The API rejects payloads larger than a few MB; keep a safe headroom.
+MAX_PHOTO_BYTES = 5 * 1024 * 1024
+ALLOWED_PHOTO_CONTENT_TYPES = {"image/jpeg", "image/jpg", "image/png"}
 
 class GoogleContactsError(Exception):
     """Exception raised for errors in the Google Contacts service."""
@@ -363,11 +370,70 @@ class GoogleContactsService:
             self.service.people().deleteContact(
                 resourceName=resource_name
             ).execute()
-            
+
             return {'success': True, 'resourceName': resource_name}
-        
+
         except HttpError as error:
             raise GoogleContactsError(f"Error deleting contact: {error}")
+
+    def update_contact_photo_from_url(
+        self, resource_name: str, photo_url: str
+    ) -> Dict[str, Any]:
+        """Download an image from a URL and set it as the contact's photo.
+
+        The Google People API ``updateContactPhoto`` endpoint expects the raw
+        image bytes encoded as a base64 string in the ``photoBytes`` field.
+        Only JPEG and PNG are accepted.
+        """
+        if not resource_name.startswith("people/"):
+            raise GoogleContactsError(
+                f"Invalid resource name '{resource_name}'. Must start with 'people/'."
+            )
+
+        try:
+            photo_bytes, content_type = _download_image(photo_url)
+        except GoogleContactsError:
+            raise
+        except Exception as error:
+            raise GoogleContactsError(
+                f"Failed to download image from {photo_url}: {error}"
+            )
+
+        encoded = base64.b64encode(photo_bytes).decode("utf-8")
+
+        body = {
+            "photoBytes": encoded,
+            "personFields": "names,emailAddresses,phoneNumbers,photos",
+        }
+
+        try:
+            response = self.service.people().updateContactPhoto(
+                resourceName=resource_name,
+                body=body,
+            ).execute()
+        except HttpError as error:
+            raise GoogleContactsError(
+                f"Error updating contact photo: {error}"
+            )
+
+        person = response.get("person", {})
+        formatted = self._format_contact(person) if person else {
+            "resourceName": resource_name
+        }
+        photo_url_returned = None
+        photos = person.get("photos", []) if person else []
+        if photos:
+            photo_url_returned = photos[0].get("url")
+
+        return {
+            "success": True,
+            "resourceName": resource_name,
+            "contentType": content_type,
+            "bytes": len(photo_bytes),
+            "sourceUrl": photo_url,
+            "photoUrl": photo_url_returned,
+            "contact": formatted,
+        }
     
     def list_directory_people(self, query: Optional[str] = None, max_results: int = 50) -> List[Dict]:
         """List people from the Google Workspace directory.
@@ -547,3 +613,54 @@ class GoogleContactsService:
             'department': department,
             'jobTitle': job_title
         }
+
+
+def _sniff_image_content_type(data: bytes) -> Optional[str]:
+    """Detect JPEG/PNG from the first bytes without relying on the server header."""
+    if data.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    return None
+
+
+def _download_image(url: str) -> Tuple[bytes, str]:
+    """Fetch an image URL and return ``(bytes, content_type)``.
+
+    Raises :class:`GoogleContactsError` when the target is not a JPEG/PNG
+    or the payload is too large for the People API.
+    """
+    if not url or not url.lower().startswith(("http://", "https://")):
+        raise GoogleContactsError(
+            f"Photo URL must be http(s): got '{url}'"
+        )
+
+    with httpx.Client(
+        follow_redirects=True,
+        timeout=30.0,
+        headers={"User-Agent": "mcp-google-contacts-server"},
+    ) as client:
+        response = client.get(url)
+        response.raise_for_status()
+        data = response.content
+
+    if len(data) == 0:
+        raise GoogleContactsError("Downloaded image is empty")
+    if len(data) > MAX_PHOTO_BYTES:
+        raise GoogleContactsError(
+            f"Image is too large ({len(data)} bytes); max {MAX_PHOTO_BYTES}"
+        )
+
+    header_ct = (
+        response.headers.get("content-type", "").split(";")[0].strip().lower()
+    )
+    sniffed = _sniff_image_content_type(data)
+
+    content_type = sniffed or header_ct
+    if content_type not in ALLOWED_PHOTO_CONTENT_TYPES:
+        raise GoogleContactsError(
+            f"Unsupported image type '{content_type or 'unknown'}'. "
+            "Google People API only accepts JPEG or PNG."
+        )
+
+    return data, content_type
