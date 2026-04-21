@@ -16,6 +16,7 @@ setup(
         "google-auth",
         "google-auth-oauthlib",
         "httpx",
+        "pillow>=10",
         "pydantic",
     ],
     classifiers=[

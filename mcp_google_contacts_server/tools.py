@@ -275,32 +275,46 @@ def register_tools(mcp: FastMCP) -> None:
             return f"Error: Failed to retrieve other contacts - {str(e)}"
 
     @mcp.tool
-    async def update_contact_photo(resource_name: str, photo_url: str) -> str:
+    async def update_contact_photo(
+        resource_name: str,
+        photo_url: str,
+        target_size: Optional[int] = None,
+    ) -> str:
         """Set a contact's profile photo from a public image URL.
 
-        The server downloads the image, base64-encodes it, and calls the
-        Google People API ``people.updateContactPhoto`` endpoint. Only JPEG
-        and PNG up to roughly 5 MB are accepted.
+        The server downloads the image, center-crops it to a square, resizes
+        it to ``target_size`` (default: 720 px, Google's recommended profile
+        photo resolution) and JPEG-encodes it before calling
+        ``people.updateContactPhoto``. Upload is capped at 5 MB; quality is
+        lowered automatically if the JPEG is still too big.
 
         Args:
             resource_name: Contact resource name (people/*)
-            photo_url: HTTP(S) URL pointing at a JPEG or PNG image
+            photo_url: HTTP(S) URL pointing at an image (JPEG/PNG/etc.)
+            target_size: Optional square edge length in pixels (min 250).
+                Defaults to 720 or $MCP_CONTACT_PHOTO_SIZE.
         """
         service = init_service()
         if not service:
             return "Error: Google Contacts service is not available. Please check your credentials."
 
         try:
-            result = service.update_contact_photo_from_url(resource_name, photo_url)
+            result = service.update_contact_photo_from_url(
+                resource_name, photo_url, target_size=target_size
+            )
         except GoogleContactsError as e:
             return f"Error: Failed to update contact photo - {e}"
         except Exception as e:
             return f"Error: Failed to update contact photo - {e}"
 
+        src_w, src_h = result["sourceDimensions"]
         parts = [
             f"Photo updated successfully for {result['resourceName']}",
             f"Source: {result['sourceUrl']}",
-            f"Uploaded: {result['bytes']} bytes ({result['contentType']})",
+            f"Source: {src_w}x{src_h} px, {result['sourceBytes']} bytes "
+            f"({result['sourceContentType'] or 'unknown'})",
+            f"Uploaded: {result['uploadedSize']} {result['uploadedContentType']}, "
+            f"{result['uploadedBytes']} bytes",
         ]
         if result.get("photoUrl"):
             parts.append(f"Google photo URL: {result['photoUrl']}")

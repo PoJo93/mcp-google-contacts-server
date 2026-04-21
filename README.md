@@ -107,13 +107,25 @@ MCP_TRANSPORT=http MCP_OAUTH_ENABLED=1 mcp-google-contacts
 update_contact_photo(
     resource_name="people/c12345678901234567",
     photo_url="https://example.com/jane.jpg",
+    # target_size=720,  # optional, default 720 (Google's recommendation)
 )
 ```
 
-The server downloads the URL, verifies it is a JPEG or PNG up to ~5 MB,
-base64-encodes the bytes and calls
-`PATCH https://people.googleapis.com/v1/{resourceName}:updateContactPhoto`
-([docs](https://developers.google.com/people/api/rest/v1/people/updateContactPhoto)).
+The server:
+
+1. Downloads the URL (up to 25 MB raw, any format Pillow can decode).
+2. Honours EXIF orientation, flattens transparency onto white.
+3. **Center-crops to a 1:1 square** – Google displays contact photos as
+   circles, so non-square input would be ugly.
+4. **Resizes to 720×720 px** (Google's recommended profile photo size;
+   minimum is 250 px). Configurable via `target_size` argument or
+   `MCP_CONTACT_PHOTO_SIZE` env var. Source images smaller than the target
+   are kept at their original size (no upscaling).
+5. JPEG-encodes with progressive quality fallback so the payload stays
+   under Google's 5 MB upload cap.
+6. Base64-encodes and calls
+   `PATCH https://people.googleapis.com/v1/{resourceName}:updateContactPhoto`
+   ([docs](https://developers.google.com/people/api/rest/v1/people/updateContactPhoto)).
 
 ## MCP client configuration (local)
 

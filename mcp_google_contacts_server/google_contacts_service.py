@@ -1,10 +1,12 @@
 import base64
+import io
 import json
 import os
 from typing import Dict, List, Optional, Tuple, Union, Any
 from pathlib import Path
 
 import httpx
+from PIL import Image, ImageOps
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
@@ -14,9 +16,14 @@ from googleapiclient.errors import HttpError
 from mcp_google_contacts_server.config import config
 
 # Google People API limits for contact photos.
-# The API rejects payloads larger than a few MB; keep a safe headroom.
+# https://support.contactsplus.com/hc/en-us/articles/4407285613339
 MAX_PHOTO_BYTES = 5 * 1024 * 1024
 ALLOWED_PHOTO_CONTENT_TYPES = {"image/jpeg", "image/jpg", "image/png"}
+# Google recommends 720x720 square; displayed as a circle. Anything larger is
+# either silently resized or rejected depending on the path, so we normalise
+# on the client side. Configurable via MCP_CONTACT_PHOTO_SIZE.
+DEFAULT_PHOTO_TARGET_SIZE = 720
+MIN_PHOTO_TARGET_SIZE = 250
 
 class GoogleContactsError(Exception):
     """Exception raised for errors in the Google Contacts service."""
@@ -377,21 +384,32 @@ class GoogleContactsService:
             raise GoogleContactsError(f"Error deleting contact: {error}")
 
     def update_contact_photo_from_url(
-        self, resource_name: str, photo_url: str
+        self,
+        resource_name: str,
+        photo_url: str,
+        target_size: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Download an image from a URL and set it as the contact's photo.
 
-        The Google People API ``updateContactPhoto`` endpoint expects the raw
-        image bytes encoded as a base64 string in the ``photoBytes`` field.
-        Only JPEG and PNG are accepted.
+        The image is center-cropped to a square and resized to
+        ``target_size`` (default 720 px – Google's recommendation) before
+        being base64-encoded and sent to ``people.updateContactPhoto``.
         """
         if not resource_name.startswith("people/"):
             raise GoogleContactsError(
                 f"Invalid resource name '{resource_name}'. Must start with 'people/'."
             )
 
+        size = target_size or int(
+            os.environ.get("MCP_CONTACT_PHOTO_SIZE", DEFAULT_PHOTO_TARGET_SIZE)
+        )
+        if size < MIN_PHOTO_TARGET_SIZE:
+            raise GoogleContactsError(
+                f"Target size {size} is below Google's 250 px minimum."
+            )
+
         try:
-            photo_bytes, content_type = _download_image(photo_url)
+            raw_bytes, raw_content_type = _download_image(photo_url)
         except GoogleContactsError:
             raise
         except Exception as error:
@@ -399,7 +417,18 @@ class GoogleContactsService:
                 f"Failed to download image from {photo_url}: {error}"
             )
 
-        encoded = base64.b64encode(photo_bytes).decode("utf-8")
+        try:
+            normalised, final_content_type, original_size = _normalise_for_contact_photo(
+                raw_bytes, size
+            )
+        except GoogleContactsError:
+            raise
+        except Exception as error:
+            raise GoogleContactsError(
+                f"Failed to process image from {photo_url}: {error}"
+            )
+
+        encoded = base64.b64encode(normalised).decode("utf-8")
 
         body = {
             "photoBytes": encoded,
@@ -428,9 +457,13 @@ class GoogleContactsService:
         return {
             "success": True,
             "resourceName": resource_name,
-            "contentType": content_type,
-            "bytes": len(photo_bytes),
             "sourceUrl": photo_url,
+            "sourceContentType": raw_content_type,
+            "sourceBytes": len(raw_bytes),
+            "sourceDimensions": original_size,
+            "uploadedContentType": final_content_type,
+            "uploadedBytes": len(normalised),
+            "uploadedSize": f"{size}x{size}",
             "photoUrl": photo_url_returned,
             "contact": formatted,
         }
@@ -615,25 +648,13 @@ class GoogleContactsService:
         }
 
 
-def _sniff_image_content_type(data: bytes) -> Optional[str]:
-    """Detect JPEG/PNG from the first bytes without relying on the server header."""
-    if data.startswith(b"\xff\xd8\xff"):
-        return "image/jpeg"
-    if data.startswith(b"\x89PNG\r\n\x1a\n"):
-        return "image/png"
-    return None
+MAX_RAW_DOWNLOAD_BYTES = 25 * 1024 * 1024  # cap before we decode & resize
 
 
 def _download_image(url: str) -> Tuple[bytes, str]:
-    """Fetch an image URL and return ``(bytes, content_type)``.
-
-    Raises :class:`GoogleContactsError` when the target is not a JPEG/PNG
-    or the payload is too large for the People API.
-    """
+    """Fetch an image URL and return ``(bytes, content_type_from_server)``."""
     if not url or not url.lower().startswith(("http://", "https://")):
-        raise GoogleContactsError(
-            f"Photo URL must be http(s): got '{url}'"
-        )
+        raise GoogleContactsError(f"Photo URL must be http(s): got '{url}'")
 
     with httpx.Client(
         follow_redirects=True,
@@ -646,21 +667,70 @@ def _download_image(url: str) -> Tuple[bytes, str]:
 
     if len(data) == 0:
         raise GoogleContactsError("Downloaded image is empty")
-    if len(data) > MAX_PHOTO_BYTES:
+    if len(data) > MAX_RAW_DOWNLOAD_BYTES:
         raise GoogleContactsError(
-            f"Image is too large ({len(data)} bytes); max {MAX_PHOTO_BYTES}"
+            f"Downloaded image is too large ({len(data)} bytes); "
+            f"max {MAX_RAW_DOWNLOAD_BYTES}"
         )
 
-    header_ct = (
+    content_type = (
         response.headers.get("content-type", "").split(";")[0].strip().lower()
     )
-    sniffed = _sniff_image_content_type(data)
+    return data, content_type or "application/octet-stream"
 
-    content_type = sniffed or header_ct
-    if content_type not in ALLOWED_PHOTO_CONTENT_TYPES:
+
+def _normalise_for_contact_photo(
+    data: bytes, target_size: int
+) -> Tuple[bytes, str, Tuple[int, int]]:
+    """Center-crop to a square, resize to ``target_size`` and JPEG-encode.
+
+    Returns ``(bytes, "image/jpeg", (original_w, original_h))``.
+    """
+    try:
+        img = Image.open(io.BytesIO(data))
+        img.load()
+    except Exception as error:
+        raise GoogleContactsError(f"Unreadable image data: {error}")
+
+    original_size = img.size  # (w, h)
+
+    # Honour EXIF orientation so portrait phone photos don't end up sideways.
+    img = ImageOps.exif_transpose(img)
+
+    # Flatten transparency onto white – the contact photo view is a circle,
+    # but Google's upload expects opaque JPEG for best compatibility.
+    if img.mode not in ("RGB", "L"):
+        background = Image.new("RGB", img.size, (255, 255, 255))
+        if img.mode == "RGBA":
+            background.paste(img, mask=img.split()[-1])
+        else:
+            background.paste(img.convert("RGBA"), mask=img.convert("RGBA").split()[-1])
+        img = background
+    elif img.mode == "L":
+        img = img.convert("RGB")
+
+    # Center-crop to the largest possible square so the aspect ratio is 1:1
+    # (required for Google's circular display).
+    side = min(img.size)
+    left = (img.width - side) // 2
+    top = (img.height - side) // 2
+    img = img.crop((left, top, left + side, top + side))
+
+    # Only shrink – never upscale tiny source images.
+    if side > target_size:
+        img = img.resize((target_size, target_size), Image.LANCZOS)
+
+    # Write out JPEG, iteratively lowering quality until we fit the 5 MB cap.
+    buffer = io.BytesIO()
+    for quality in (92, 85, 78, 70, 60, 50):
+        buffer.seek(0)
+        buffer.truncate()
+        img.save(buffer, format="JPEG", quality=quality, optimize=True, progressive=True)
+        if buffer.tell() <= MAX_PHOTO_BYTES:
+            break
+    else:
         raise GoogleContactsError(
-            f"Unsupported image type '{content_type or 'unknown'}'. "
-            "Google People API only accepts JPEG or PNG."
+            "Could not compress image below Google's 5 MB upload cap."
         )
 
-    return data, content_type
+    return buffer.getvalue(), "image/jpeg", original_size

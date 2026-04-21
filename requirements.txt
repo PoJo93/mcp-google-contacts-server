@@ -4,5 +4,6 @@ google-api-python-client
 google-auth-httplib2
 google-auth-oauthlib
 httpx
+pillow>=10
 pydantic
 typing-extensions
