@@ -1,8 +1,12 @@
 """MCP tools implementation for Google Contacts (FastMCP 2.x)."""
-from typing import Optional
+from functools import partial
+import sys
 import traceback
+from typing import Optional
 
 from fastmcp import FastMCP
+
+_log = partial(print, file=sys.stderr)
 
 from mcp_google_contacts_server.google_contacts_service import (
     GoogleContactsService,
@@ -29,7 +33,7 @@ def init_service() -> Optional[GoogleContactsService]:
     try:
         try:
             contacts_service = GoogleContactsService.from_env()
-            print("Successfully loaded credentials from environment variables.")
+            _log("Successfully loaded credentials from environment variables.")
             return contacts_service
         except GoogleContactsError:
             pass
@@ -37,22 +41,22 @@ def init_service() -> Optional[GoogleContactsService]:
         for path in config.credentials_paths:
             if path.exists():
                 try:
-                    print(f"Found credentials file at {path}")
+                    _log(f"Found credentials file at {path}")
                     contacts_service = GoogleContactsService.from_file(path)
-                    print("Successfully loaded credentials from file.")
+                    _log("Successfully loaded credentials from file.")
                     return contacts_service
                 except GoogleContactsError as e:
-                    print(f"Error with credentials at {path}: {e}")
+                    _log(f"Error with credentials at {path}: {e}")
                     continue
 
-        print(
+        _log(
             "No valid credentials found. Please provide credentials to use Google Contacts."
         )
         return None
 
     except Exception as e:
-        print(f"Error initializing Google Contacts service: {str(e)}")
-        traceback.print_exc()
+        _log(f"Error initializing Google Contacts service: {str(e)}")
+        traceback.print_exc(file=sys.stderr)
         return None
 
 
@@ -302,8 +306,6 @@ def register_tools(mcp: FastMCP) -> None:
             result = service.update_contact_photo_from_url(
                 resource_name, photo_url, target_size=target_size
             )
-        except GoogleContactsError as e:
-            return f"Error: Failed to update contact photo - {e}"
         except Exception as e:
             return f"Error: Failed to update contact photo - {e}"
 

@@ -194,12 +194,11 @@ def main() -> None:
         print("Running with stdio transport", file=sys.stderr)
         mcp.run(transport="stdio")
     else:
-        transport_name = "http" if transport == "http" else transport
         print(
-            f"Running with {transport_name} transport on {args.host}:{args.port}",
+            f"Running with {transport} transport on {args.host}:{args.port}",
             file=sys.stderr,
         )
-        mcp.run(transport=transport_name, host=args.host, port=args.port)
+        mcp.run(transport=transport, host=args.host, port=args.port)
 
 
 if __name__ == "__main__":

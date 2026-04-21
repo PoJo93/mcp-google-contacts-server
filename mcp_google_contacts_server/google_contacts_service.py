@@ -15,15 +15,13 @@ from googleapiclient.errors import HttpError
 
 from mcp_google_contacts_server.config import config
 
-# Google People API limits for contact photos.
-# https://support.contactsplus.com/hc/en-us/articles/4407285613339
+# Google displays contact photos as circles and recommends 720x720 square
+# JPEG/PNG up to 5 MB. We normalise client-side before upload.
 MAX_PHOTO_BYTES = 5 * 1024 * 1024
-ALLOWED_PHOTO_CONTENT_TYPES = {"image/jpeg", "image/jpg", "image/png"}
-# Google recommends 720x720 square; displayed as a circle. Anything larger is
-# either silently resized or rejected depending on the path, so we normalise
-# on the client side. Configurable via MCP_CONTACT_PHOTO_SIZE.
+MAX_RAW_DOWNLOAD_BYTES = 25 * 1024 * 1024
 DEFAULT_PHOTO_TARGET_SIZE = 720
 MIN_PHOTO_TARGET_SIZE = 250
+JPEG_QUALITY = 85
 
 class GoogleContactsError(Exception):
     """Exception raised for errors in the Google Contacts service."""
@@ -408,25 +406,10 @@ class GoogleContactsService:
                 f"Target size {size} is below Google's 250 px minimum."
             )
 
-        try:
-            raw_bytes, raw_content_type = _download_image(photo_url)
-        except GoogleContactsError:
-            raise
-        except Exception as error:
-            raise GoogleContactsError(
-                f"Failed to download image from {photo_url}: {error}"
-            )
-
-        try:
-            normalised, final_content_type, original_size = _normalise_for_contact_photo(
-                raw_bytes, size
-            )
-        except GoogleContactsError:
-            raise
-        except Exception as error:
-            raise GoogleContactsError(
-                f"Failed to process image from {photo_url}: {error}"
-            )
+        raw_bytes, raw_content_type = _download_image(photo_url)
+        normalised, final_content_type, original_size = _normalise_for_contact_photo(
+            raw_bytes, size
+        )
 
         encoded = base64.b64encode(normalised).decode("utf-8")
 
@@ -648,9 +631,6 @@ class GoogleContactsService:
         }
 
 
-MAX_RAW_DOWNLOAD_BYTES = 25 * 1024 * 1024  # cap before we decode & resize
-
-
 def _download_image(url: str) -> Tuple[bytes, str]:
     """Fetch an image URL and return ``(bytes, content_type_from_server)``."""
     if not url or not url.lower().startswith(("http://", "https://")):
@@ -692,45 +672,32 @@ def _normalise_for_contact_photo(
     except Exception as error:
         raise GoogleContactsError(f"Unreadable image data: {error}")
 
-    original_size = img.size  # (w, h)
+    original_size = img.size
 
     # Honour EXIF orientation so portrait phone photos don't end up sideways.
     img = ImageOps.exif_transpose(img)
 
-    # Flatten transparency onto white – the contact photo view is a circle,
-    # but Google's upload expects opaque JPEG for best compatibility.
-    if img.mode not in ("RGB", "L"):
-        background = Image.new("RGB", img.size, (255, 255, 255))
-        if img.mode == "RGBA":
-            background.paste(img, mask=img.split()[-1])
-        else:
-            background.paste(img.convert("RGBA"), mask=img.convert("RGBA").split()[-1])
+    # Flatten transparency onto white: Google's circle-crop display gives
+    # ugly halos on contacts with alpha channels otherwise.
+    if img.mode != "RGB":
+        rgba = img.convert("RGBA")
+        background = Image.new("RGB", rgba.size, (255, 255, 255))
+        background.paste(rgba, mask=rgba.split()[-1])
         img = background
-    elif img.mode == "L":
-        img = img.convert("RGB")
 
-    # Center-crop to the largest possible square so the aspect ratio is 1:1
-    # (required for Google's circular display).
-    side = min(img.size)
-    left = (img.width - side) // 2
-    top = (img.height - side) // 2
-    img = img.crop((left, top, left + side, top + side))
+    # Never upscale tiny sources; just center-crop and shrink when larger.
+    fitted_side = min(min(img.size), target_size)
+    img = ImageOps.fit(
+        img, (fitted_side, fitted_side), method=Image.LANCZOS, centering=(0.5, 0.5)
+    )
 
-    # Only shrink – never upscale tiny source images.
-    if side > target_size:
-        img = img.resize((target_size, target_size), Image.LANCZOS)
-
-    # Write out JPEG, iteratively lowering quality until we fit the 5 MB cap.
     buffer = io.BytesIO()
-    for quality in (92, 85, 78, 70, 60, 50):
-        buffer.seek(0)
-        buffer.truncate()
-        img.save(buffer, format="JPEG", quality=quality, optimize=True, progressive=True)
-        if buffer.tell() <= MAX_PHOTO_BYTES:
-            break
-    else:
+    img.save(
+        buffer, format="JPEG", quality=JPEG_QUALITY, optimize=True, progressive=True
+    )
+    if buffer.tell() > MAX_PHOTO_BYTES:
         raise GoogleContactsError(
-            "Could not compress image below Google's 5 MB upload cap."
+            f"Encoded JPEG is {buffer.tell()} bytes, exceeds the 5 MB upload cap."
         )
 
     return buffer.getvalue(), "image/jpeg", original_size

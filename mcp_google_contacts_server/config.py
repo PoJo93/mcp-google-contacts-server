@@ -106,22 +106,22 @@ def load_config() -> ContactsConfig:
         "on",
     }
 
-    return ContactsConfig(
-        google_client_id=os.environ.get("GOOGLE_CLIENT_ID"),
-        google_client_secret=os.environ.get("GOOGLE_CLIENT_SECRET"),
-        google_refresh_token=os.environ.get("GOOGLE_REFRESH_TOKEN"),
-        credentials_paths=default_paths,
-        token_path=token_dir / "token.json",
-        oauth_enabled=oauth_enabled,
-        oauth_base_url=os.environ.get("MCP_OAUTH_BASE_URL"),
-        oauth_redirect_path=os.environ.get(
-            "MCP_OAUTH_REDIRECT_PATH", "/auth/callback"
-        ),
-        oauth_allowed_emails=_split_env_list(
+    kwargs = {
+        "google_client_id": os.environ.get("GOOGLE_CLIENT_ID"),
+        "google_client_secret": os.environ.get("GOOGLE_CLIENT_SECRET"),
+        "google_refresh_token": os.environ.get("GOOGLE_REFRESH_TOKEN"),
+        "credentials_paths": default_paths,
+        "token_path": token_dir / "token.json",
+        "oauth_enabled": oauth_enabled,
+        "oauth_base_url": os.environ.get("MCP_OAUTH_BASE_URL"),
+        "oauth_allowed_emails": _split_env_list(
             os.environ.get("MCP_OAUTH_ALLOWED_EMAILS")
         ),
-        oauth_jwt_signing_key=os.environ.get("MCP_OAUTH_JWT_SIGNING_KEY"),
-    )
+        "oauth_jwt_signing_key": os.environ.get("MCP_OAUTH_JWT_SIGNING_KEY"),
+    }
+    if redirect_path := os.environ.get("MCP_OAUTH_REDIRECT_PATH"):
+        kwargs["oauth_redirect_path"] = redirect_path
+    return ContactsConfig(**kwargs)
 
 
 # Global configuration instance
